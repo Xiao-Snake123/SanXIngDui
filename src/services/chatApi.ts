@@ -1,24 +1,27 @@
-interface OpenWebUIMessage {
-  role: "system" | "user" | "assistant";
+interface ChatHistoryMessage {
+  role: "user" | "assistant";
   content: string;
 }
 
-interface OpenWebUIResponse {
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
+interface ChatMessagesResponse {
+  answer?: string;
+  conversation_id?: string;
+  message_id?: string;
 }
 
-interface OpenWebUIErrorResponse {
-  detail?: string;
+interface ChatMessagesErrorResponse {
+  code?: string;
   message?: string;
+  status?: number;
 }
 
-const OPENWEBUI_BASE = "/openwebui";
-const OPENWEBUI_MODEL = import.meta.env.VITE_OPENWEBUI_MODEL || "111";
-const OPENWEBUI_TOKEN = import.meta.env.VITE_OPENWEBUI_API_KEY || "";
+const CHAT_APP_API_KEY = import.meta.env.VITE_CHAT_APP_API_KEY || "";
+const CHAT_MESSAGES_URL = CHAT_APP_API_KEY
+  ? "https://sxdapi.aitrais.cn/v1/chat-messages"
+  : "/dify/v1/chat-messages";
+const CHAT_USER_ID = "user_001";
+
+let conversationId = "";
 
 const SANXINGDUI_SYSTEM_PROMPT = `你是一位专业的三星堆考古知识科普讲解员，名叫“三星堆小助手”。
 你的核心任务是：
@@ -28,54 +31,62 @@ const SANXINGDUI_SYSTEM_PROMPT = `你是一位专业的三星堆考古知识科�
 4. 可以主动补充必要背景，但不要偏离用户问题本身。
 5. 语气友好、耐心，像一位靠谱的科普老师。`;
 
-export async function generateAssistantReply(userQuestion: string, history: OpenWebUIMessage[] = []): Promise<string> {
-  if (!OPENWEBUI_TOKEN) {
-    throw new Error("未配置 Open WebUI API Key，请设置 VITE_OPENWEBUI_API_KEY");
+function formatQuery(userQuestion: string, history: ChatHistoryMessage[]): string {
+  const recentHistory = history
+    .slice(-6)
+    .map((message) => `${message.role === "user" ? "用户" : "助手"}：${message.content}`)
+    .join("\n");
+
+  if (!recentHistory) {
+    return `${SANXINGDUI_SYSTEM_PROMPT}\n\n用户问题：${userQuestion}`;
   }
 
-  const response = await fetch(`${OPENWEBUI_BASE}/api/chat/completions`, {
+  return `${SANXINGDUI_SYSTEM_PROMPT}\n\n以下是最近对话，可用于理解上下文：\n${recentHistory}\n\n用户最新问题：${userQuestion}`;
+}
+
+export async function generateAssistantReply(userQuestion: string, history: ChatHistoryMessage[] = []): Promise<string> {
+  const response = await fetch(CHAT_MESSAGES_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENWEBUI_TOKEN}`,
+      ...(CHAT_APP_API_KEY ? { Authorization: `Bearer ${CHAT_APP_API_KEY}` } : {}),
     },
     body: JSON.stringify({
-      model: OPENWEBUI_MODEL,
-      messages: [
-        { role: "system", content: SANXINGDUI_SYSTEM_PROMPT },
-        ...history,
-        { role: "user", content: userQuestion },
-      ],
-      stream: false,
+      inputs: {},
+      query: formatQuery(userQuestion, history),
+      response_mode: "blocking",
+      conversation_id: conversationId,
+      user: CHAT_USER_ID,
     }),
   });
 
-  if (!response.ok) {
-    const rawText = await response.text();
-    let detail = rawText;
+  const rawText = await response.text();
+  let data: ChatMessagesResponse & ChatMessagesErrorResponse;
 
-    try {
-      const parsed = JSON.parse(rawText) as OpenWebUIErrorResponse;
-      detail = parsed.detail || parsed.message || rawText;
-    } catch {
-      // keep raw response text as detail
-    }
+  try {
+    data = JSON.parse(rawText) as ChatMessagesResponse & ChatMessagesErrorResponse;
+  } catch {
+    throw new Error(`小助手接口返回了无法解析的响应：${rawText || response.status}`);
+  }
+
+  if (!response.ok) {
+    const detail = data.message || data.code || rawText || `请求失败：${response.status}`;
 
     if (response.status === 401) {
-      throw new Error(
-        `401 Unauthorized：请检查 VITE_OPENWEBUI_API_KEY 是否有效（建议在 Open WebUI 重新生成 API Key），并确认 VITE_OPENWEBUI_MODEL 使用的是模型 ID 而非显示名称。${detail ? ` 详情：${detail}` : ""}`,
-      );
+      throw new Error(`401 Unauthorized：请检查 CHAT_APP_API_KEY 是否有效。${detail ? ` 详情：${detail}` : ""}`);
     }
 
-    throw new Error(detail || `Open WebUI 请求失败：${response.status}`);
+    throw new Error(detail);
   }
 
-  const data = (await response.json()) as OpenWebUIResponse;
-  const content = data.choices?.[0]?.message?.content?.trim();
-
-  if (!content) {
-    throw new Error("Open WebUI 未返回有效回复");
+  if (data.conversation_id) {
+    conversationId = data.conversation_id;
   }
 
-  return content;
+  const answer = data.answer?.trim();
+  if (!answer) {
+    throw new Error("小助手接口未返回有效回复");
+  }
+
+  return answer;
 }

@@ -1,9 +1,9 @@
 import { useRef, useEffect, useState } from "react";
 import { motion } from "motion/react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Maximize2, Pause, Play } from "lucide-react";
 
 const HERO_BG = "https://images.unsplash.com/photo-1706552604002-f7efaebebca6?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1920";
-const HERO_ARTIFACT = "https://sxd-tx-1315371622.cos.ap-nanjing.myqcloud.com/cloud/policy/1688384343223_KHMb6w7J.png?imageMogr2/format/webp/ignore-error/1";
+const HERO_ARTIFACT_VIDEO = "/videos/287384434.mp4";
 
 interface HeroSectionProps {
   onScrollTo: (id: string) => void;
@@ -11,8 +11,14 @@ interface HeroSectionProps {
 
 export function HeroSection({ onScrollTo }: HeroSectionProps) {
   const sectionRef = useRef<HTMLDivElement>(null);
+  const artifactFrameRef = useRef<HTMLDivElement>(null);
+  const artifactVideoRef = useRef<HTMLVideoElement>(null);
   const [mouse, setMouse] = useState({ x: 0, y: 0 });
   const [loaded, setLoaded] = useState(false);
+  const [artifactReady, setArtifactReady] = useState(false);
+  const [artifactHovered, setArtifactHovered] = useState(false);
+  const [artifactPlaying, setArtifactPlaying] = useState(true);
+  const [artifactProgress, setArtifactProgress] = useState(0);
 
   useEffect(() => {
     setTimeout(() => setLoaded(true), 200);
@@ -32,6 +38,65 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
   const px = mouse.x;
   const py = mouse.y;
 
+  const updateArtifactProgress = () => {
+    const video = artifactVideoRef.current;
+    if (!video?.duration) {
+      setArtifactProgress(0);
+      return;
+    }
+
+    setArtifactProgress((video.currentTime / video.duration) * 100);
+  };
+
+  const toggleArtifactPlayback = () => {
+    const video = artifactVideoRef.current;
+    if (!video) {
+      return;
+    }
+
+    if (video.paused) {
+      void video.play();
+    } else {
+      video.pause();
+    }
+  };
+
+  const seekArtifactVideo = (value: number) => {
+    const video = artifactVideoRef.current;
+    if (!video?.duration) {
+      return;
+    }
+
+    video.currentTime = (value / 100) * video.duration;
+    setArtifactProgress(value);
+  };
+
+  const openArtifactFullscreen = () => {
+    const frame = artifactFrameRef.current;
+    if (!frame) {
+      return;
+    }
+
+    const fullscreenTarget = frame as HTMLDivElement & {
+      webkitRequestFullscreen?: () => Promise<void>;
+      msRequestFullscreen?: () => Promise<void>;
+    };
+
+    if (fullscreenTarget.requestFullscreen) {
+      void fullscreenTarget.requestFullscreen();
+      return;
+    }
+
+    if (fullscreenTarget.webkitRequestFullscreen) {
+      void fullscreenTarget.webkitRequestFullscreen();
+      return;
+    }
+
+    if (fullscreenTarget.msRequestFullscreen) {
+      void fullscreenTarget.msRequestFullscreen();
+    }
+  };
+
   return (
     <section
       id="hero"
@@ -47,6 +112,19 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
         background: "#0B0C10",
       }}
     >
+      <style>{`
+        .hero-artifact-frame:fullscreen {
+          width: 100vw !important;
+          height: 100vh !important;
+          aspect-ratio: auto !important;
+          background: #050607;
+        }
+
+        .hero-artifact-frame:fullscreen video {
+          object-fit: contain !important;
+        }
+      `}</style>
+
       {/* Background layer – slowest parallax */}
       <div
         style={{
@@ -87,7 +165,7 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
         }}
       />
 
-      {/* Artifact image layer – mid parallax */}
+      {/* Artifact video layer – mid parallax */}
       <div
         style={{
           position: "absolute",
@@ -95,7 +173,7 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
           display: "flex",
           alignItems: "center",
           justifyContent: "flex-end",
-          paddingRight: "8%",
+          paddingRight: "clamp(180px, 10vw, 180px)",
           zIndex: 2,
           pointerEvents: "none",
           transform: `translate(${px * 18}px, ${py * 12}px)`,
@@ -103,24 +181,142 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
         }}
       >
         <div
+          className="hero-artifact-frame"
+          ref={artifactFrameRef}
+          onMouseEnter={() => setArtifactHovered(true)}
+          onMouseLeave={() => setArtifactHovered(false)}
           style={{
-            width: "min(380px, 38vw)",
-            aspectRatio: "3/4",
+            width: "min(580px, 40vw)",
+            aspectRatio: "16/9",
             position: "relative",
-            opacity: loaded ? 0.55 : 0,
+            opacity: loaded && artifactReady ? 0.66 : 0,
             transition: "opacity 1.2s ease",
+            pointerEvents: "auto",
           }}
         >
+          <video
+            ref={artifactVideoRef}
+            autoPlay
+            muted
+            loop
+            playsInline
+            preload="metadata"
+            src={HERO_ARTIFACT_VIDEO}
+            onCanPlay={() => setArtifactReady(true)}
+            onTimeUpdate={updateArtifactProgress}
+            onLoadedMetadata={updateArtifactProgress}
+            onPlay={() => setArtifactPlaying(true)}
+            onPause={() => setArtifactPlaying(false)}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              objectPosition: "center",
+              borderRadius: 4,
+              filter: "brightness(0.82) contrast(1.18) saturate(0.95) sepia(0.18)",
+              maskImage: "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.95) 12%, rgba(0,0,0,0.95) 82%, rgba(0,0,0,0) 100%)",
+              WebkitMaskImage: "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.95) 12%, rgba(0,0,0,0.95) 82%, rgba(0,0,0,0) 100%)",
+            }}
+          />
           <div
             style={{
               position: "absolute",
               inset: 0,
-              backgroundImage: `url(${HERO_ARTIFACT})`,
-              backgroundSize: "cover",
-              backgroundPosition: "center top",
               borderRadius: 4,
-              maskImage: "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.9) 15%, rgba(0,0,0,0.9) 75%, rgba(0,0,0,0) 100%)",
-              WebkitMaskImage: "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.9) 15%, rgba(0,0,0,0.9) 75%, rgba(0,0,0,0) 100%)",
+              background:
+                "linear-gradient(135deg, rgba(212,175,55,0.22), rgba(69,162,158,0.08) 42%, rgba(11,12,16,0.22)), radial-gradient(circle at 18% 20%, rgba(212,175,55,0.18), transparent 34%)",
+              mixBlendMode: "screen",
+              pointerEvents: "none",
+            }}
+          />
+          <motion.div
+            initial={false}
+            animate={{ opacity: artifactHovered ? 1 : 0, y: artifactHovered ? 0 : 8 }}
+            transition={{ duration: 0.2 }}
+            style={{
+              position: "absolute",
+              left: 12,
+              right: 12,
+              bottom: 12,
+              zIndex: 3,
+              display: "grid",
+              gridTemplateColumns: "34px 1fr 34px",
+              alignItems: "center",
+              gap: 10,
+              padding: "9px 10px",
+              borderRadius: 6,
+              background: "linear-gradient(180deg, rgba(11,12,16,0.68), rgba(11,12,16,0.9))",
+              border: "1px solid rgba(212,175,55,0.22)",
+              boxShadow: "0 10px 28px rgba(0,0,0,0.35)",
+              backdropFilter: "blur(10px)",
+              pointerEvents: artifactHovered ? "auto" : "none",
+            }}
+          >
+            <button
+              type="button"
+              title={artifactPlaying ? "暂停" : "播放"}
+              onClick={toggleArtifactPlayback}
+              style={{
+                width: 34,
+                height: 34,
+                display: "grid",
+                placeItems: "center",
+                borderRadius: 5,
+                border: "1px solid rgba(212,175,55,0.35)",
+                background: "rgba(212,175,55,0.12)",
+                color: "#D4AF37",
+                cursor: "pointer",
+              }}
+            >
+              {artifactPlaying ? <Pause size={15} /> : <Play size={15} />}
+            </button>
+
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={0.1}
+              aria-label="视频进度"
+              value={artifactProgress}
+              onChange={(event) => seekArtifactVideo(Number(event.currentTarget.value))}
+              style={{
+                width: "100%",
+                height: 4,
+                margin: 0,
+                accentColor: "#D4AF37",
+                cursor: "pointer",
+              }}
+            />
+
+            <button
+              type="button"
+              title="全屏"
+              onClick={openArtifactFullscreen}
+              style={{
+                width: 34,
+                height: 34,
+                display: "grid",
+                placeItems: "center",
+                borderRadius: 5,
+                border: "1px solid rgba(69,162,158,0.35)",
+                background: "rgba(69,162,158,0.12)",
+                color: "#45A29E",
+                cursor: "pointer",
+              }}
+            >
+              <Maximize2 size={15} />
+            </button>
+          </motion.div>
+          <div
+            style={{
+              position: "absolute",
+              inset: "-12%",
+              borderRadius: 8,
+              background: "radial-gradient(ellipse at center, rgba(212,175,55,0.16), transparent 62%)",
+              filter: "blur(18px)",
+              zIndex: -1,
             }}
           />
           {/* Gold border glow */}
@@ -139,12 +335,13 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
       {/* Main content – fastest parallax */}
       <div
         style={{
-          position: "relative",
+          position: "absolute",
+          left: "clamp(120px, 16vw, 320px)",
+          top: "52%",
           zIndex: 3,
-          textAlign: "center",
-          padding: "0 24px",
-          maxWidth: 800,
-          transform: `translate(${px * -8}px, ${py * -6}px)`,
+          textAlign: "left",
+          width: "min(700px, 44vw)",
+          transform: `translate3d(${px * -8}px, calc(-50% + ${py * -6}px), 0)`,
           transition: "transform 0.15s linear",
         }}
       >
@@ -157,7 +354,7 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
             width: 60,
             height: 2,
             background: "#D4AF37",
-            margin: "0 auto 24px",
+            margin: "0 0 24px",
           }}
         />
 
@@ -170,7 +367,7 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
             fontSize: 13,
             fontWeight: 300,
             color: "#45A29E",
-            letterSpacing: 8,
+            letterSpacing: 7,
             marginBottom: 20,
             textTransform: "uppercase",
           }}
@@ -184,7 +381,7 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
           transition={{ duration: 1, delay: 0.7 }}
           style={{
             fontFamily: "'Noto Serif SC', serif",
-            fontSize: "clamp(32px, 5vw, 72px)",
+            fontSize: "clamp(36px, 4.2vw, 68px)",
             fontWeight: 900,
             color: "#EFEFEF",
             lineHeight: 1.2,
@@ -220,7 +417,7 @@ export function HeroSection({ onScrollTo }: HeroSectionProps) {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 1.2 }}
-          style={{ display: "flex", gap: 16, justifyContent: "center", flexWrap: "wrap" }}
+          style={{ display: "flex", gap: 16, justifyContent: "flex-start", flexWrap: "wrap" }}
         >
           <button
             onClick={() => onScrollTo("museum")}

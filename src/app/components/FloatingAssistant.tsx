@@ -230,8 +230,8 @@ export function FloatingAssistant({}: FloatingAssistantProps) {
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (error) {
       const fallbackText = error instanceof Error
-        ? `暂时无法连接 Open WebUI：${error.message}`
-        : "暂时无法连接 Open WebUI，请稍后重试。";
+        ? `暂时无法连接小助手服务：${error.message}`
+        : "暂时无法连接小助手服务，请稍后重试。";
 
       const assistantMsg: Message = {
         id: msgIdRef.current++,

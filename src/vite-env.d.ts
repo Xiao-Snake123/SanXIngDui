@@ -1,8 +1,8 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  readonly VITE_OPENWEBUI_API_KEY?: string;
-  readonly VITE_OPENWEBUI_MODEL?: string;
+  readonly VITE_CHAT_APP_API_KEY?: string;
+  readonly VITE_DASHSCOPE_API_KEY?: string;
 }
 
 interface ImportMeta {

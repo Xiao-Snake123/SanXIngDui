@@ -1,0 +1,16 @@
+{
+  "terminal.integrated.env.linux": {
+    "PATH": "${env:HOME}/.nvm/versions/node/v24.18.0/bin:${env:PATH}"
+  },
+  "terminal.integrated.profiles.linux": {
+    "bash": {
+      "path": "bash",
+      "args": ["-i"]
+    }
+  },
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "terminal.integrated.automationProfile.linux": {
+    "path": "bash",
+    "args": ["-i"]
+  }
+}
