@@ -1,0 +1,37 @@
+# 本地/单机部署：前端 nginx (8023) + 后端 FastAPI (8123)
+#
+# 密钥一律从宿主机环境变量传入，不要写进这个文件：
+#   DASHSCOPE_API_KEY=... API_KEY=... docker compose up -d
+# 未设 API_KEY 时后端会以无鉴权模式启动并在日志里告警。
+
+services:
+  backend:
+    build: ./backend
+    container_name: sxd-backend
+    ports:
+      - "8123:8123"
+    environment:
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      # 生产务必设置：设了之后 /api/* 需要 X-API-Key 头
+      API_KEY: ${API_KEY:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: ${REDIS_URL:-}
+      CORPUS_DIR: data/corpus/v2
+      # 多副本时请设为 false，迁移放进发布流水线的独立 Job
+      DB_AUTO_MIGRATE: "true"
+      LOG_LEVEL: INFO
+    volumes:
+      - backend_var:/app/var
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: sxd-frontend
+    ports:
+      - "8023:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend_var:

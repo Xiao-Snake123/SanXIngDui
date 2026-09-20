@@ -1,0 +1,15 @@
+# ── QLoRA 微调依赖（仅训练/本地推理需要，需 CUDA GPU）────────────────────────
+# 安装顺序建议：先装 torch（按 CUDA 版本选 index-url），再装其余。
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r backend/requirements-train.txt
+#
+torch>=2.4.0
+transformers>=4.46.0
+peft>=0.13.0
+bitsandbytes>=0.44.0
+accelerate>=1.0.0
+datasets>=3.0.0
+# Qwen2.5-VL 的图像预处理（动态分辨率 / 智能缩放）
+qwen-vl-utils>=0.0.8
+safetensors>=0.4.5

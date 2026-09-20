@@ -1,0 +1,5 @@
+@import 'tailwindcss' source(none);
+
+/* 只扫真正写业务代码的目录，避免把 components/ui/ 下零引用的 shadcn 组件扫进来生成死代码。 */
+@source '../app';
+@source '../services';

@@ -1,0 +1,31 @@
+# ── 运行期依赖（轻量优先，全部为纯 Python / 预编译 wheel）────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+httpx>=0.27.0
+python-multipart>=0.0.12
+
+# ── Agent 编排 ──────────────────────────────────────────────────────────────
+# langgraph 是主引擎。若安装失败（受限网络/私有源），
+# ENGINE_BACKEND=builtin 可切换到内置 DAG 调度器，节点与路由规则完全一致。
+langgraph>=0.2.60
+langchain-core>=0.3.25
+
+# ── 检索与图像指标 ──────────────────────────────────────────────────────────
+numpy>=1.26.0
+Pillow>=10.4.0
+# 繁→简折叠（检索层用）。语料含 83% 繁体（古籍原文 + 维基引文），
+# 而 BM25 是字级的，「蠶叢」与「蚕丛」不折叠就永远不匹配。
+# 纯 Python、无需编译；不可用时会降级并在 /api/corpus 的 fold_backend 上体现。
+zhconv>=1.4.3
+
+# ── 持久化：PostgreSQL + pgvector + Redis ───────────────────────────────────
+# 三者都是「可选但一旦配置就会被真实使用」：连不上时自动降级到进程内实现，
+# 且 /api/health 会如实报告当前实际档位（与出图链的三级降级同一套原则）。
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30.0
+# 提供 SQLAlchemy 的 Vector 类型（仅用于 DDL；运行时读写显式 CAST，不依赖 codec）
+pgvector>=0.3.6
+redis>=5.2.0
+alembic>=1.14.0

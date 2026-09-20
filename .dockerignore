@@ -1,0 +1,28 @@
+# 防止密钥与本地产物被打进镜像。
+# backend/.env 里有真实的 DASHSCOPE_API_KEY 与数据库口令 ——
+# 少了这几行，`docker build` 会把它们原样拷进镜像层，推到仓库即泄露。
+**/.env
+**/.env.*
+!**/.env.example
+backend/.env
+frontend/.env.local
+
+# 运行产物与本地缓存（体积大且无意义）
+**/var/
+**/__pycache__/
+**/*.pyc
+**/node_modules/
+**/dist/
+frontend/dist/
+backend/var/
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# 文档与脚本（镜像里不需要）
+docs/
+guidelines/
+*.md
