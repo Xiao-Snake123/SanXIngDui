@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from sqlalchemy import text
+from sqlalchemy import and_, or_, select, text
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -129,9 +129,12 @@ class PgVectorIndex:
 
     backend = "pgvector"
 
-    def __init__(self, db: Database, dimension: int) -> None:
+    def __init__(self, db: Database, dimension: int, corpus_tag: str | None = None) -> None:
         self.db = db
         self.dimension = dimension
+        # 语料身份标签：None 表示「不作用域隔离」（诊断脚本/旧存量语义），
+        # 非 None 时写/读/清理都只认该标签的向量，保证检索只命中当前语料。
+        self.corpus_tag = corpus_tag
 
     # ── 建库 ────────────────────────────────────────────────────────────────
     async def ensure(
@@ -203,6 +206,7 @@ class PgVectorIndex:
                 "tags": list(entry.tags),
                 "embedder": used,
                 "content_hash": entry.content_hash,
+                "corpus_tag": self.corpus_tag,
                 "embedding": vector,
             }
             for entry, vector in zip(pending, vectors, strict=False)
@@ -266,10 +270,25 @@ class PgVectorIndex:
 
         if not wanted:
             return 0
-        async with self.db.session() as session:
-            result = await session.execute(
-                delete(CorpusChunk).where(CorpusChunk.doc_id.notin_(wanted))
+        if self.corpus_tag is None:
+            # 诊断模式（未带标签）：保持旧的全局 NOT IN(doc_id) 清理，兼容 check_storage 等脚本
+            condition = CorpusChunk.doc_id.notin_(wanted)
+        else:
+            # 作用域隔离（AUDIT M13 修复）：清理只在「当前 corpus_tag」范围内进行，
+            # 不再对整张表做全局删 —— 否则两个语料共用一个 pgvector 库时，
+            # 切回旧语料会静默清空另一份语料的全部向量。
+            #   - 标签不同 / 标签为 NULL 的行 → 删（不属于本实例管理的语料）
+            #   - 标签相同但 doc_id 不在当前语料里 → 删（本语料内被删/改过的条目）
+            condition = or_(
+                CorpusChunk.corpus_tag != self.corpus_tag,
+                CorpusChunk.corpus_tag.is_(None),
+                and_(
+                    CorpusChunk.corpus_tag == self.corpus_tag,
+                    CorpusChunk.doc_id.notin_(wanted),
+                ),
             )
+        async with self.db.session() as session:
+            result = await session.execute(delete(CorpusChunk).where(condition))
             await session.commit()
         removed = int(result.rowcount or 0)
         if removed:
@@ -296,14 +315,13 @@ class PgVectorIndex:
 
         from app.storage.models import CorpusChunk
 
+        statement = select(
+            CorpusChunk.doc_id, CorpusChunk.embedder, CorpusChunk.content_hash
+        ).where(CorpusChunk.embedding.is_not(None))
+        if self.corpus_tag is not None:
+            statement = statement.where(CorpusChunk.corpus_tag == self.corpus_tag)
         async with self.db.session() as session:
-            rows = (
-                await session.execute(
-                    select(CorpusChunk.doc_id, CorpusChunk.embedder, CorpusChunk.content_hash).where(
-                        CorpusChunk.embedding.is_not(None)
-                    )
-                )
-            ).all()
+            rows = (await session.execute(statement)).all()
         return {
             str(doc_id): (str(embedder), content_hash if content_hash is None else str(content_hash))
             for doc_id, embedder, content_hash in rows
@@ -320,22 +338,21 @@ class PgVectorIndex:
     async def search(self, vector: list[float], *, limit: int) -> dict[str, float]:
         from app.storage.repository import _vector_literal
 
-        statement = text(
-            """
-            SELECT doc_id, 1 - (embedding <=> CAST(:query AS vector)) AS score
-            FROM corpus_chunks
-            WHERE embedding IS NOT NULL
-            ORDER BY embedding <=> CAST(:query AS vector)
-            LIMIT :limit
-            """
+        sql = (
+            "SELECT doc_id, 1 - (embedding <=> CAST(:query AS vector)) AS score "
+            "FROM corpus_chunks "
+            "WHERE embedding IS NOT NULL"
         )
+        params: dict[str, Any] = {"query": _vector_literal(vector), "limit": max(1, limit)}
+        # corpus_tag 作用域隔离：非 None 时只召回当前语料的向量，
+        # 即使表里有其它语料的残留也绝不会被检索返回（修复 AUDIT M13 的「路由串味」）。
+        if self.corpus_tag is not None:
+            sql += " AND corpus_tag = :tag"
+            params["tag"] = self.corpus_tag
+        sql += " ORDER BY embedding <=> CAST(:query AS vector) LIMIT :limit"
+        statement = text(sql)
         async with self.db.session() as session:
-            rows = (
-                await session.execute(
-                    statement,
-                    {"query": _vector_literal(vector), "limit": max(1, limit)},
-                )
-            ).all()
+            rows = (await session.execute(statement, params)).all()
         return {str(doc_id): float(score) for doc_id, score in rows if score and score > 0}
 
     async def aclose(self) -> None:
@@ -374,14 +391,19 @@ def _top(scores: dict[str, float], limit: int) -> dict[str, float]:
     return dict(ordered)
 
 
-def build_vector_index(db: Database, *, dimension: int) -> VectorIndex | None:
+def build_vector_index(
+    db: Database, *, dimension: int, corpus_tag: str | None = None
+) -> VectorIndex | None:
     """按可用性挑实现。
 
     返回 None 表示「连进程内都不可用」（语料为空时不建索引），调用方自行处理。
     注意这里**不抛异常**：向量通道是可选依赖，缺了只能降级，不能拦住启动。
+
+    `corpus_tag` 透传给 PgVectorIndex：非 None 时启用语料作用域隔离
+    （写/读/清理都只认该标签）；None 时退化为旧的「全表」语义（诊断脚本用）。
     """
     if db.available and db.vector_version:
-        return PgVectorIndex(db, dimension)
+        return PgVectorIndex(db, dimension, corpus_tag)
     if db.available and not db.vector_version:
         logger.warning(
             "数据库已连接但未安装 pgvector 扩展，向量检索退回进程内实现。"

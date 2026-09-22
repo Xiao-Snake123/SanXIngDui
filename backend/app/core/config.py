@@ -155,7 +155,15 @@ class Settings(BaseSettings):
     lora_enabled: bool = False
 
     # ── 检索 ────────────────────────────────────────────────────────────────
-    corpus_dir: str = "data/corpus"
+    # 默认指向 v2（爬取/清洗后的真实文献语料，255 张、带结构化出处）。
+    # 历史默认是 "data/corpus"（v1，约 53 张自撰种子），它只适合当「风格质检 rubric
+    # 的撰写素材」，不适合当线上 RAG 证据库（缺 citation、部分条目 authority 虚高）。
+    # v1 文件仍保留在 data/corpus/ 作为备份，但不在此处被加载。
+    # 注意：不要为了「递归加载 v2 子目录」改成 glob("**/*.jsonl") —— v2/deprecated/
+    # 是明确废弃的语料，递归会把它也装进来。load_corpus 只 glob 一层，
+    # 指向 data/corpus/v2 即可精确命中 4 个正式文件。
+    # 生产/容器另有 CORPUS_DIR 环境变量覆盖（见 docker-compose.yml），此处只是兜底默认值。
+    corpus_dir: str = "data/corpus/v2"
     retrieval_top_k: int = 8
     retrieval_rerank_top_n: int = 4
 

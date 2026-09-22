@@ -1,0 +1,14 @@
+name,folder,url,license,bytes,status,fetched
+isccac_2024_sanxingdui_civilization.pdf,academic,https://www.isccac.org/d/file/articles/2024-07-02/25fdea110c393daa1f147c90cfa53f1e.pdf,ISCCAC 2024 conference paper (site public),290080,OK,2026-09-20
+semanticscholar_2024_microbial_diversity.pdf,academic,https://pdfs.semanticscholar.org/fc0c/8b425e6cae84941b0cc6df3c676dd4369804.pdf,Semantic Scholar open PDF,4346744,OK,2026-09-20
+antiquity_2022_new_discoveries.pdf,academic,https://www.cambridge.org/core/journals/antiquity/article/new-discoveries-at-the-sanxingdui-bronze-age-site-in-south-west-china/D96494368471CF7CBA817690CDCA5A75,Antiquity 2022 open access paper,9094798,OK,2026-09-20
+people_daily_2021_0614_archaeology.pdf,museum,https://paper.people.com.cn/rmrbhwb/images/2021-06/14/12/rmrbhwb2021061412.pdf,People's Daily Overseas 2021-06-14 report,1162431,OK,2026-09-20
+cjn_2025_0929_forum_results.pdf,museum,https://whwb.cjn.cn/resfile/2025-09-29/15/B2025-09-29A1501.pdf,Changjiang Daily 2025-09-29 forum results report,2210640,OK,2026-09-20
+study_times_2024_0405.pdf,museum,https://paper.studytimes.cn/images/2024-04/05/A6/20240405A6_pdf.pdf,Study Times 2024-04-05 report,1133922,OK,2026-09-20
+tyrbw_2023_1117_multidisciplinary.pdf,museum,http://epaper.tyrbw.com/tywb/resfile/2023-11-17/20/tyrbw2023111720.pdf,Taiyuan Daily 2023-11-17 multidisciplinary results report,854091,OK,2026-09-20
+heritage_science_2024_ivory.pdf,academic,https://www.nature.com/articles/s40494-024-01531-8.pdf,Heritage Science 2024 - URL returned HTML not PDF (invalid),0,FAIL_URL_RETURNS_HTML,2026-09-20
+sckg_k4_pit_excavation_brief_2024.pdf,official,https://www.sckg.com/uploads/soft/20240514/2-240514103U5564.pdf,Sichuan Inst. of Archaeology K4 pit excavation brief,0,FAIL_HOST_UNREACHABLE,2026-09-20
+sckg_2015_yueliangwan_excavation.pdf,official,https://www.sckg.com/uploads/soft/20240429/2-2404291A101941.pdf,Sichuan Inst. of Archaeology 2015 Yueliangwan excavation,0,FAIL_HOST_UNREACHABLE,2026-09-20
+sckg_guanghan_chronicle.pdf,official,https://www.sckg.com/uploads/soft/20230509/2-230509155415R6.pdf,Guanghan Sanxingdui chronicle,0,FAIL_HOST_UNREACHABLE,2026-09-20
+museumschina_sanxingdui.html,museum,https://www.museumschina.cn/museums/details?id=51068121800003,MuseumsChina Sanxingdui museum detail,0,FAIL_HOST_UNREACHABLE,2026-09-20
+sxd_cn_home.html,museum,https://www.sxd.cn/,SPA shell with no static text content,1896,REMOVED_EMPTY_SPA,2026-09-20

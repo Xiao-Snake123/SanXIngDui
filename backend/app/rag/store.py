@@ -165,7 +165,9 @@ class HybridRetriever:
         # 若这里不按需连接，脚本会静默用进程内检索 —— 而服务端用 pgvector，
         # 同一份语料在两处走不同通道，是最难察觉的一类不一致。
         await database.ensure_connected()
-        index = build_vector_index(database, dimension=self.embedder.dimension)
+        index = build_vector_index(
+            database, dimension=self.embedder.dimension, corpus_tag=self.corpus.fingerprint
+        )
         if index is None:  # pragma: no cover - 当前实现永远返回可用索引
             return
 

@@ -207,10 +207,10 @@ class TaskRepository:
             """
             INSERT INTO corpus_chunks
                 (doc_id, title, "object", era, category, source, authority, tags,
-                 embedder, content_hash, embedding, updated_at)
+                 embedder, content_hash, corpus_tag, embedding, updated_at)
             VALUES
-                (:doc_id, :title, :object, :era, :category, :source, :authority,
-                 CAST(:tags AS jsonb), :embedder, :content_hash,
+                (                :doc_id, :title, :object, :era, :category, :source, :authority,
+                 CAST(:tags AS jsonb), :embedder, :content_hash, :corpus_tag,
                  CAST(:embedding AS vector), now())
             ON CONFLICT (doc_id) DO UPDATE SET
                 title = EXCLUDED.title,
@@ -222,6 +222,7 @@ class TaskRepository:
                 tags = EXCLUDED.tags,
                 embedder = EXCLUDED.embedder,
                 content_hash = EXCLUDED.content_hash,
+                corpus_tag = EXCLUDED.corpus_tag,
                 embedding = EXCLUDED.embedding,
                 updated_at = now()
             """
@@ -232,6 +233,7 @@ class TaskRepository:
                 "tags": _json(row.get("tags") or []),
                 "embedding": _vector_literal(row.get("embedding")),
                 "content_hash": row.get("content_hash"),
+                "corpus_tag": row.get("corpus_tag"),
             }
             for row in rows
         ]

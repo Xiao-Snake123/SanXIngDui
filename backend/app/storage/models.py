@@ -202,6 +202,15 @@ class CorpusChunk(Base):
     # 旧向量会被继续复用，于是检索静默变差 —— 没有报错、没有告警，
     # 只是「召回的相关性好像不如以前」。加指纹之后，改过的那几条会被重新向量化。
     content_hash: Mapped[str | None] = mapped_column(String(32))
+    # 语料身份标签：标识这条向量属于哪一版/哪个语料。
+    #
+    # 没有它，pgvector 表会在「切换语料」或「多实例共享同一库」时被污染：检索会返回
+    # 不属于当前语料的旧向量（挤占 top-k、改变排序、甚至引用已删除的出处）；而清理又是
+    # 「DELETE ... NOT IN(当前 doc_id)」全局删，会静默清空另一份语料的全部向量（AUDIT M13）。
+    # 加标签后，写/读/清理都按标签作用域隔离：当前实例只认自己标签的向量，
+    # 切换或并发都不会互相踩。取值通常就是 Corpus.fingerprint（同语料多副本天然同标签→可共享向量）。
+    # 允许 NULL：未带标签的存量行 / 诊断脚本（check_storage）走旧的「全表」语义。
+    corpus_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.vector_dim))
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -210,6 +219,7 @@ class CorpusChunk(Base):
     __table_args__ = (
         Index("ix_corpus_object", "object"),
         Index("ix_corpus_embedder", "embedder"),
+        Index("ix_corpus_tag", "corpus_tag"),
         # HNSW + 余弦距离：与进程内实现（归一化向量点积）语义一致。
         # m / ef_construction 走配置，因为「召回率 vs 建索引耗时」是要按语料规模调的。
         Index(
