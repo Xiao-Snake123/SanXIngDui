@@ -37,7 +37,6 @@ from app.api.schemas import (
     RestoreResponse,
 )
 from app.core.config import settings
-from app.conversation.smalltalk import classify_smalltalk
 from app.qa.answerer import answer as ask_question
 from app.core.http import proxy_diagnostics
 from app.core.logging import get_logger
@@ -50,6 +49,7 @@ from app.quality.style_profiles import all_profiles
 from app.rag.store import get_retriever, reset_retriever
 from app.storage import health as storage_health
 from app.storage import tasks as task_repository
+from app.storage.profile import user_facts
 
 logger = get_logger("app.api")
 router = APIRouter(prefix="/api")
@@ -227,53 +227,45 @@ async def corpus_overview() -> dict[str, Any]:
     return retriever.stats()
 
 
-# /api/ask 的闲聊应答。这里服务的是「古蜀大祭司」问答面板（FloatingAssistant），
-# 文案沿用其人设，与 /api/chat/stream 的固定话术区分开。
-_ASK_SMALLTALK_REPLIES: dict[str, str] = {
-    "identity": (
-        "吾乃古蜀大祭司，守护三星堆圣地三千载。汝可问「青铜纵目面具的宽和高」，"
-        "亦可问「金杖上刻的是什么图案」——凡典籍有载者，吾必据实相告，不作妄语。"
-    ),
-    "capability": (
-        "吾可为你解答三星堆与古蜀文明之疑：文物形制、出土始末、典籍记载，皆有出处可循。"
-        "若典籍无载，吾会直说不知。"
-    ),
-    "chat": (
-        "与吾闲谈亦可。然吾所长者，乃三星堆之史事——"
-        "不妨问吾「青铜神树有几层几枝」，或「蚕丛纵目出自何处」。"
-    ),
-    "greeting": "汝好。有疑尽管相询——三星堆之文物史事，凡典籍有载者，吾必据实相告。",
-    "thanks": "不必言谢。若还有疑，尽可再问。",
-}
-
 @router.post("/ask", response_model=AskResponse)
 async def ask(payload: AskRequest) -> AskResponse:
-    """领域问答：**只依据本项目的语料库作答**，并回带可点开的引用。
+    """领域问答：闲聊与史实问题都走同一通道，由一次 LLM 调用判定意图。
 
     为什么不接外部对话服务（Dify 之类）：引用必须来自我们自己的语料，
     否则「每条事实都能溯源」这句话就不成立 —— 那正是本项目要消灭的
     「看起来有出处、实际追不到」的问题。
 
     行为契约（详见 app/qa/answerer.py）：
-    - 检索不到可依据的记载 → `refused=true`，明确说不能回答；
+    - 闲聊 / 问候 / 身份 / 致谢 → intent=chat，由模型用人设自然回，不查史料；
+    - 史实问题检索到可依据记载 → 带引用作答；
+    - 检索不到可依据的记载 → intent=refuse，`refused=true`，人设化说明缺了哪类史料；
     - 自撰内容与来源不明的条目**一律不作依据**；
     - 引用的展示内容取自语料条目，不经模型改写。
+
+    意图判定统一交给 answerer（不再用关键词表预判），详见 app/conversation/router。
     """
-    # 非知识类消息（问候/身份/致谢/聊天请求）不进语料检索——
-    # 「你是谁」去查史料只会得到「无相关记载」。规则层直接应答，
-    # 判定与 /api/chat/stream 的闲聊闸门是同一套（classify_smalltalk）。
-    smalltalk = classify_smalltalk(payload.question)
-    if smalltalk is not None:
-        category, _ = smalltalk
-        metrics.inc("sxd_ask_smalltalk_total")
-        return AskResponse(
-            question=payload.question,
-            answer=_ASK_SMALLTALK_REPLIES[category],
-            confidence="high",
-            retrieval_mode="smalltalk",
-        )
+    # 闲聊 / 问候 / 身份 / 致谢等消息不再用关键词表预判，直接交给 answerer：
+    # 它由一次 LLM 调用判定意图（chat/answer/refuse），闲聊时用人设自然回、
+    # 不查史料、不挂引用；史实问题才走检索 + 引用。关键词闸门已删除。
     result = await ask_question(payload.question, top_n=payload.top_n)
     return AskResponse(**result.to_dict())
+
+
+@router.delete("/profile/{user_id}")
+async def delete_user_profile(user_id: str) -> dict[str, Any]:
+    """删除某用户的长期画像——「这个人是谁」那一层。
+
+    与「清空会话」是两件事，端点也刻意分开：
+    - 会话 = 聊过什么（`DELETE /api/chat/sessions`）
+    - 画像 = 这个人是谁（本端点）
+
+    用户说「忘了我」时两件都要调；但分开提供之后，
+    「只清聊天记录、仍然记得我」这种更常见的需求也才能被满足。
+    """
+    removed = await user_facts.delete_all_facts(user_id)
+    # removed < 0 是失败（不是「没有画像」）：必须如实告诉调用方，
+    # 否则用户点了清除却什么都没发生，界面上还显示成功。
+    return {"ok": removed >= 0, "removed": removed, "user_id": user_id}
 
 
 # ════════════════════════════════════════════════════════════════════════════

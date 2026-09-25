@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { X, Send, ChevronDown, BookOpen, ExternalLink, AlertTriangle, Info } from "lucide-react";
+import { X, Send, ChevronDown, BookOpen, ExternalLink, Info } from "lucide-react";
 import { useAssistant } from "../context/AssistantContext";
 import { askKnowledgeBase, sourceTypeLabel, type AskCitation } from "../../services";
 
@@ -550,36 +550,15 @@ export function FloatingAssistant() {
                       background:
                         msg.role === "user"
                           ? "rgba(69,162,158,0.15)"
-                          : msg.refused
-                            ? "rgba(180,87,78,0.08)"
-                            : "rgba(31,40,51,0.8)",
+                          : "rgba(31,40,51,0.8)",
                       border:
                         msg.role === "user"
                           ? "1px solid rgba(69,162,158,0.25)"
-                          : msg.refused
-                            ? "1px solid rgba(180,87,78,0.25)"
-                            : "1px solid rgba(255,255,255,0.06)",
+                          : "1px solid rgba(255,255,255,0.06)",
                       borderRadius: msg.role === "user" ? "12px 4px 12px 12px" : "4px 12px 12px 12px",
                       padding: "10px 14px",
                     }}
                   >
-                    {msg.refused && (
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 5,
-                          marginBottom: 6,
-                          color: "#B4574E",
-                          fontFamily: "'Noto Sans SC', sans-serif",
-                          fontSize: 11,
-                        }}
-                      >
-                        <AlertTriangle size={11} />
-                        史料库中无相关记载
-                      </div>
-                    )}
-
                     <p
                       style={{
                         fontFamily: "'Noto Sans SC', sans-serif",

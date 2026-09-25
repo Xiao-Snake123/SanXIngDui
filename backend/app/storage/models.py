@@ -233,3 +233,121 @@ class CorpusChunk(Base):
             },
         ),
     )
+
+
+class UserFact(Base):
+    """用户画像事实（长期记忆），与会话（短期记忆）互补。
+
+    短期 vs 长期的分工
+    ------------------
+    - 会话（Redis，见 storage/sessions.py）：**短期**。TTL 1800s、换 session_id 即丢，
+      只在当前对话里被拼接进 prompt（app/conversation/agent.py）。
+    - 画像事实（本表）：**长期**。按 user_id 落库，跨会话、跨设备、跨重启都在，
+      每轮答话前注入提示词，让助手「认识这个人」。
+
+    为什么单独一张表而不是塞进会话
+    ------------------------------
+    两者生命周期完全相反（会话要被 TTL 回收，画像要永久保留），读写模式也不同——
+    会话**每轮都写**，画像只在「用户陈述了新事实」时 upsert 一次。混在一起会导致：
+    「清会话」误删画像，或画像被 TTL 连带回收。
+
+    `(user_id, key)` 唯一：同名事实（如 name）只保留最新一条，
+    用户重复陈述是**覆盖**而不是堆积，避免表里躺着「肖晟 / 肖晟 / 肖先生」三条互相矛盾的值。
+    """
+
+    __tablename__ = "user_facts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 事实标识：name / preference_style / occupation ... 简短英文键
+    key: Mapped[str] = mapped_column(String(64), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    # 溯源：这条事实是从哪个会话里说出来的（便于排查「记成了别人说的」）
+    source_session_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "key", name="uq_user_fact"),
+        Index("ix_user_facts_user_id", "user_id"),
+    )
+
+
+class ChatSessionRecord(Base):
+    """会话记录（列表视图）：一行一个会话，用于「我的历史会话」列表。
+
+    为什么单独建表而不是直接查 Redis
+    --------------------------------
+    Redis 里的会话有 TTL（1800s）、上限 200 条、超出淘汰最久未活动的——
+    它本质是**活跃缓存**而不是记录：30 分钟不聊就没了，也查不出
+    「某个用户有哪些会话」。本表持久化会话元信息并按 user_id 建索引，
+    让「列出我的历史会话」退化成一次普通 SQL 查询。
+
+    与 user_facts 的分工
+    --------------------
+    user_facts 记「这个人是谁」（跨会话长期画像），
+    本表记「聊过什么」（会话元信息）。删除会话不该删掉画像，反之亦然。
+    """
+
+    __tablename__ = "chat_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 列表里显示的标题：默认取首条用户消息截取，用户可改
+    title: Mapped[str | None] = mapped_column(Text)
+    turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 列表排序键：**最近一次对话**的时间。不用 updated_at，
+    # 否则「改个标题」也会把会话顶到列表最前面。
+    last_message_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # 列表查询的固定形状：按用户取、按最近活跃倒序
+        Index("ix_chat_sessions_user_last", "user_id", "last_message_at"),
+    )
+
+
+class ChatMessageRecord(Base):
+    """会话消息（详情视图）：一条消息一行，用于回看完整对话、以及「回温」重建会话。
+
+    为什么不把整个会话存成一个 JSONB 列
+    -----------------------------------
+    整段存写起来省事，代价是：无法分页、无法只取最近 N 条、
+    改一条要整段重写（长会话浪费）。按消息拆行之后，
+    「回看详情」和「从 PG 重建会话（回温）」都能按需取。
+
+    proposals / intent / evidence_titles 与会话里的 ChatTurn 一一对应：
+    回温时要能原样还原成 ChatTurn，字段必须齐。
+    """
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    proposals: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    intent: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    evidence_titles: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # 完整的引用块。只有标题不够：回看历史回答时，正文里的 [1] 要能点开出处的
+    # 原文、链接与可信度——否则「每条事实都能溯源」这句话在回看时就失效了。
+    evidence: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # 按会话取消息、按时间正序——回看与回温都依赖这个顺序
+        Index("ix_chat_messages_session_created", "session_id", "created_at"),
+    )

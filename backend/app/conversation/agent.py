@@ -34,7 +34,8 @@ from typing import Any
 
 from app.agents import lexicon
 from app.conversation import strategies
-from app.conversation.smalltalk import SMALLTALK_EXAMPLES, classify_smalltalk
+from app.conversation.router import classify_intent, creation_anchor_present
+from app.conversation.smalltalk import SMALLTALK_EXAMPLES
 from app.conversation.store import ChatSession
 from app.core.errors import ProviderUnavailable
 from app.core.logging import get_logger
@@ -43,6 +44,7 @@ from app.core.tracing import TraceRecorder
 from app.models.llm import Message, text_part
 from app.models.registry import registry
 from app.qa.answerer import answer as qa_answer
+from app.qa.answerer import stream_answer as qa_stream
 from app.quality.style_profiles import PROFILES, resolve_profile
 from app.rag.store import get_retriever
 from app.rag.text import truncate
@@ -323,6 +325,7 @@ INTENT_SYSTEM = """你是三星堆数字复原项目的意图解析器。把用�
 person→动作+锚点占中景全身；artefact→器物如何呈现+占主体；scene→空间关系+全貌可读
 
 【硬约束】identity/scene/subject 只从候选表选，没有留空""。style 没提就留空，别默认博物馆纪实摄影。没说人别默认大祭司，没说场景别默认博物馆。
+【硬约束·主体】subject **必须**是用户原话里真提到过的（含别名）。候选表只是「对得上就填」的参考，不是填空题的选项：原话没提任何文物时 subject 一律留空，不许从候选里挑一个凑数——挑错主体会让整段史料检索跟着跑偏，把一个不存在的创作意图说成有据可依。
 
 示例
 输入：大祭司戴青铜纵目面具在祭祀台前主持祭祀的场景
@@ -362,8 +365,33 @@ def _relic_candidates(text: str, limit: int = 4) -> str:
         for spec in lexicon.RELICS
         if spec.label in text or any(alias in text for alias in spec.aliases)
     ]
-    rest = [spec.label for spec in lexicon.RELICS if spec.label not in hit]
-    return "、".join((hit + rest)[:limit])
+    if not hit:
+        # 原文（含别名）一个都没命中时，**不要**再塞几个候选进去凑数。
+        # 出过的实际问题：用户说「改成现代话」，这里照样递上 4 个文物名，
+        # 而解析器被要求「只从候选表选」，于是抓了「青铜纵目面具」，
+        # 检索随即召回面具史料——一句无关的话被包装成了有据可依的答案。
+        # 宁可留空（上游路由会把它挡回问答通道），也不要凭空给一个主体。
+        return "（原文未提及文物，subject 请留空）"
+    return "、".join(hit[:limit])
+
+
+def _has_creation_anchor(text: str) -> bool:
+    """这句话里到底有没有「要创作什么」的落点。
+
+    路由的兜底闸门用它：只有当原话里确实出现文物/身份/场景，或出现明确的
+    创作动词，才算真有东西可做。孤零零一句「改成现代话」没有任何落点——
+    它改的是助手的说法，不是画面。
+    """
+    message = text or ""
+    if lexicon.resolve_relic(message):
+        return True
+    if any(item in message for item in lexicon.IDENTITIES):
+        return True
+    if any(item in message for item in lexicon.SCENES):
+        return True
+    # 「改/换成/加上」不算落点：它们可能是在改说话方式，故由
+    # `creation_anchor_present` 排除掉这一类词后再判断。
+    return creation_anchor_present(message)
 
 
 def _prior_slots(prior: dict[str, Any]) -> str:
@@ -902,53 +930,80 @@ def _fallback_reply(intent: dict[str, Any], evidence: list[dict[str, Any]], prop
     return "".join(parts)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-#  非创作消息闸门（闲聊 / 领域提问）
-# ════════════════════════════════════════════════════════════════════════════
-# 「你是谁」不是生图需求 —— 提问类消息交给 qa.answerer（带引用、答不出就明说），
-# 不再被意图解析硬掰成「你想复原……」。
-_QUESTION_WORDS = ("是什么", "什么是", "为什么", "为啥", "怎么", "如何", "什么时候", "何时",
-                   "多少", "哪里", "哪儿", "谁", "介绍", "讲讲", "吗",
-                   # 100 题压测（scripts/chat_probe.py）暴露的缺口：裸疑问词与
-                   # 「多高 / 几号坑 / 有没有」这类没被上面覆盖的问法
-                   "什么", "哪", "几", "多高", "多长", "多大", "多重",
-                   "有没有", "是不是", "知不知道")
-# 出现这些词说明用户在谈创作或改方案，绝不是在问知识
-_QA_FORBIDDEN = ("复原", "修复", "修补", "还原", "生成", "画", "绘", "创作", "提示词",
-                 "风格", "场景", "迁移", "海报", "视频", "照片", "改", "换成", "加上",
-                 "放大", "缩小", "压低", "特写", "构图", "光", "修")
+def _preface_line(intent: dict[str, Any]) -> str:
+    """开场白：意图一解析完就发，用来砍掉首字延迟。
+
+    规则拼的、不依赖检索/模型，所以能在 `resolve_intent` 之后立即 yield，
+    让前端在 ~1s 内就吐出第一个字，而不是空等检索与正文流式。
+    正文由 LLM 接着写，天然衔接，不重复「我理解你是…」那句。
+    """
+    kind = str(intent.get("kind") or "scene")
+    label = {"scene": "场景", "figure": "人物", "artifact": "文物修复", "style": "风格迁移"}.get(kind, "画面")
+    subject = intent.get("subject") or intent.get("brief") or ""
+    if subject:
+        return f"好的，我来处理这次{label}复原：{subject}。"
+    return f"好的，我来处理这次{label}复原。"
 
 
-def _looks_like_question(message: str) -> bool:
-    text = message.strip()
-    if not 2 <= len(text) <= 60:
-        return False
-    if any(word in text for word in _QA_FORBIDDEN):
-        return False
-    return text.endswith(("？", "?")) or any(word in text for word in _QUESTION_WORDS)
+# 非创作消息（闲聊 / 领域提问）的识别已交给我们自己的意图路由器
+# `app.conversation.router.classify_intent`（一次轻量 LLM 调用），
+# 不再维护这里的关键词表。理由见该模块 docstring。
 
 
-async def _qa_reply(message: str) -> tuple[str, list[dict[str, Any]]] | None:
-    """把领域问题转交 qa.answerer。
 
-    返回 (回答文本, 引用列表)；链路异常返回 None（交回创作管线兜底）。
-    答不准（语料无据）时不编造 —— 返回一句明说的引导话术。
+async def _qa_reply(
+    message: str,
+    history: list[dict[str, str]] | None = None,
+    user_profile: str | None = None,
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """把消息转交 qa.answerer（闲聊与史实提问都走这里）。
+
+    answerer 内部用一次 LLM 调用判定意图：闲聊用人设自然回（无引用），
+    史实问题只依据语料（答不出就人设化明说）。因此这里的返回值就是最终文案，
+    链路异常才返回 None（交回创作管线兜底）。
+
+    history 为会话历史（不含当前轮），作为**短期记忆**传给 answerer；
+    user_profile 是跨会话的**长期画像**（已格式化文本），由 answerer 注入提示词。
     """
     try:
         # top_n 用 settings 默认值（6）：给模型更宽的证据面，减少「其实语料有
         # 相关记载却被 top-3 截掉」造成的误拒。
-        result = await qa_answer(message)
+        result = await qa_answer(message, history=history, user_profile=user_profile)
     except Exception as exc:  # noqa: BLE001 - QA 失败不应阻断对话
         logger.warning("QA 链路失败: %s", exc)
         metrics.inc("sxd_chat_qa_failed_total")
         return None
-    if result.refused or not result.answer:
-        return (
-            "这个问题我在语料里没有找到可靠记载，不能编一个有出处的假答案。"
-            "你可以换个说法再问，或者直接描述想复原的场景，我来出方案。",
-            [],
-        )
     return result.answer, result.citations
+
+
+async def _qa_events(
+    message: str,
+    history: list[dict[str, str]] | None = None,
+    user_profile: str | None = None,
+) -> AsyncIterator[tuple[str, Any]]:
+    """问答事件流：先逐段吐正文 `("delta", 片段)`，收尾给 `("result", (全文, 引用))`。
+
+    把流式的「边生成边下发」和一次性兜底统一成一种产物，调用方不必分支：
+    流式任何环节失败（连接中断、JSON 解析不了）都整体退回 `_qa_reply`，
+    答案不会丢，只是退化成一次出现。
+    """
+    try:
+        async for kind, payload in qa_stream(message, history=history, user_profile=user_profile):
+            if kind == "delta":
+                yield ("delta", payload)
+            else:
+                result = payload
+                yield ("result", (result.answer, result.citations))
+                return
+    except Exception as exc:  # noqa: BLE001 - 问答失败不应阻断对话
+        logger.warning("问答流式失败: %s", exc)
+        metrics.inc("sxd_chat_qa_failed_total")
+
+    # 走到这里说明流式没产出结果 → 一次性兜底
+    qa = await _qa_reply(message, history=history, user_profile=user_profile)
+    if qa is not None:
+        yield ("delta", qa[0])
+        yield ("result", qa)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1044,34 +1099,55 @@ async def run_chat(
     session: ChatSession,
     message: str,
     tracer: TraceRecorder,
+    user_profile: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """执行一轮对话，产出事件流供 SSE 转发。"""
+    """执行一轮对话，产出事件流供 SSE 转发。
 
-    # ── 闸门一：闲聊 / 身份 / 问候 ─────────────────────────────────────────
-    # 「你是谁」「你好」不该走进生图管线。固定话术即可，不查史料、不出方案。
-    smalltalk = classify_smalltalk(message)
-    if smalltalk is not None:
-        category, reply = smalltalk
-        tracer.emit("conversation_smalltalk", "conversation", category=category)
-        yield {"type": "decision", "mode": "smalltalk", "category": category}
-        yield {"type": "proposals", "items": [], "mode": "rule"}
-        yield {"type": "delta", "text": reply}
-        yield {"type": "message", "text": reply, "mode": "rule"}
-        yield {"type": "followups", "items": list(SMALLTALK_EXAMPLES)}
-        metrics.inc("sxd_chat_turns_total", mode="smalltalk")
-        logger.info(
-            "对话轮次完成（闲聊/问候，未进入创作管线）",
-            extra={"session_id": session.session_id, "category": category},
-        )
-        return
+    user_profile 为该用户的长期画像（已格式化文本），随消息一起交给 answerer 注入；
+    为空表示「没有用户标识 / 没有画像」，此时只有会话内的短期记忆。
+    """
 
-    # ── 闸门二：领域提问（「纵目面具为什么外凸」）──────────────────────────
-    # 只在会话还没有任何方案时生效 —— 已有方案后的「能不能放大一点？」是修改
-    # 指令，必须留在创作管线里。
-    if _looks_like_question(message) and not any(t.proposals for t in session.turns):
-        qa = await _qa_reply(message)
-        if qa is not None:
-            text, citations = qa
+    # ── 意图路由：一次轻量 LLM 判定 chat / question / creation ──────────────
+    # 取代原来的关键词闲聊表（classify_smalltalk）与 _looks_like_question——
+    # 关键词表是无限维护的屎山，而意图判断本就是 LLM 擅长的事。
+    # 本轮之外的会话历史：既是路由器的上下文，也是问答通道的短期记忆。
+    history_tail = session.history()[:-1]
+    no_proposals = not any(t.proposals for t in session.turns)
+
+    # 路由必须带上下文：只看当前这一句的话，「改成现代话」（改说话方式）和
+    # 「换个角度」（改画面）长得一模一样，必然判错。
+    route = await classify_intent(message, history=history_tail, has_proposals=not no_proposals)
+
+    # ── 兜底闸门 ────────────────────────────────────────────────────────────
+    # 被判成 creation，但会话里还没有任何方案/图可改，且这句话里既没有文物、
+    # 身份、场景，也没有明确的创作动词——那它改的不是画面，而是助手的说法。
+    # 放它进创作管线的话，管线为了把槽位填满会从候选表里抓一个文物，
+    # 编出一个「有史料支撑、看起来很像对的」答案，比直接答错更糟。
+    if route == "creation" and no_proposals and not _has_creation_anchor(message):
+        route = "chat"
+
+    # 闲聊永远短路到问答通道（由 answerer 以人设自然回，不进创作管线）。
+    # 事实提问只在「尚无方案」时短路；已有方案后的追问留给创作管线（修改指令）。
+    if route == "chat" or (route == "question" and no_proposals):
+        # 把「除当前轮外的」会话历史带给 answerer 作短期记忆（当前轮已在 stream
+        # 端点 append，session.history() 末条即本轮，须排除以免重复拼入）；
+        # user_profile 是跨会话的长期画像，一并注入。
+        #
+        # 走流式：答案正文边生成边下发，不再是「等几秒整段蹦出」。
+        # 引用与 intent 要等整份 JSON 出完，因此放在正文之后补发。
+        qa_result: tuple[str, list[dict[str, Any]]] | None = None
+        async for kind, payload in _qa_events(
+            message,
+            history=history_tail,
+            user_profile=user_profile,
+        ):
+            if kind == "delta":
+                yield {"type": "delta", "text": payload}
+            else:
+                qa_result = payload
+
+        if qa_result is not None:
+            text, citations = qa_result
             evidence_items = [
                 {
                     "doc_id": item.get("doc_id"),
@@ -1083,22 +1159,31 @@ async def run_chat(
                 for item in citations
             ]
             tracer.emit("conversation_qa", "conversation", citations=len(citations))
-            yield {"type": "decision", "mode": "qa"}
-            yield {"type": "evidence", "items": evidence_items, "meta": {"mode": "qa"}, "cues": []}
+            yield {"type": "decision", "mode": "qa", "route": route}
+            yield {"type": "evidence", "items": evidence_items, "meta": {"mode": "qa", "route": route}, "cues": []}
             yield {"type": "proposals", "items": [], "mode": "rule"}
-            yield {"type": "delta", "text": text}
+            # 正文已在上面逐段下发过，这里只补发权威全量文本收尾
+            # （重复下发整段会导致前端再拼一遍）。
             yield {"type": "message", "text": text, "mode": "rule"}
             yield {"type": "followups", "items": list(SMALLTALK_EXAMPLES)}
             metrics.inc("sxd_chat_turns_total", mode="qa")
             logger.info(
-                "对话轮次完成（领域提问，转交 QA）",
-                extra={"session_id": session.session_id, "citations": len(citations)},
+                "对话轮次完成（问答/闲聊，转交 QA）",
+                extra={"session_id": session.session_id, "route": route},
             )
             return
 
     intent, intent_mode = await resolve_intent(session, message, tracer)
 
     yield {"type": "intent", "intent": intent, "mode": intent_mode}
+
+    # 立即吐出第一个字：先复述理解，LLM 正文随后接上。
+    # 不这样做时，用户在前 5~6 秒只能看到「思考中」空等——首字延迟过长，
+    # 即使后面真在流式，也很容易被误判成「不流式 / 整段蹦出」。
+    # 这句是规则拼的，不依赖检索与模型，所以能在意图解析一结束就发。
+    preface = _preface_line(intent)
+    if preface:
+        yield {"type": "delta", "text": preface}
 
     # ── 史料 grounding ──────────────────────────────────────────────────────
     queries = _retrieval_queries(intent)
@@ -1197,7 +1282,9 @@ async def run_chat(
         proposal["recommended"] = key == recommended_key
         proposals.append(proposal)
 
-    reply = "".join(reply_chunks).strip()
+    # 终帧文本必须包含开场白：否则 onMessage 会用「纯模型正文」覆盖掉
+    # 已流式拼好的「开场白 + 正文」，导致首字在收尾瞬间消失。
+    reply = (preface + "".join(reply_chunks)).strip()
     if not reply:
         reply = _fallback_reply(intent, evidence, proposals)
         # 无流式内容时一次性下发，保证前端始终能看到完整回复

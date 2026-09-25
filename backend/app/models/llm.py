@@ -239,17 +239,22 @@ class ChatClient:
         temperature: float = 0.5,
         max_tokens: int = 2048,
         tag: str = "stream",
+        json_mode: bool = False,
     ) -> AsyncIterator[str]:
         if not self.api_key:
             raise ProviderUnavailable("未配置 DASHSCOPE_API_KEY", model=self.model, tag=tag)
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": list(messages),
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": True,
         }
+        # 问答链路要求结构化输出（answer / intent / citations 在同一份 JSON 里），
+        # 所以流式也得支持 json_object，否则拿不到可解析的结构。
+        if json_mode and self.supports_json_mode:
+            payload["response_format"] = {"type": "json_object"}
         client = self._ensure_client()
         async with client.stream("POST", "/chat/completions", json=payload) as response:
             if response.status_code >= 400:

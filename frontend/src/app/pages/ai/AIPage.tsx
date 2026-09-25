@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useParams } from "react-router";
 import { Info, ServerCrash, TriangleAlert } from "lucide-react";
 import { ChatPanel } from "@/app/components/ChatPanel";
+import { SessionList } from "@/app/components/SessionList";
 import type { ArtifactPayload } from "@/app/components/ArtifactView";
 import { useAgentChat } from "@/app/hooks/useAgentChat";
 import { useAgentRestoration } from "@/app/hooks/useAgentRestoration";
@@ -107,6 +108,36 @@ export function AIPage() {
     restore.reset();
   };
 
+  // ── 会话记录：切换 / 新建 / 删除 ──────────────────────────────────────────
+  // 三者都要清掉「出图相关状态」：那些东西属于某条具体消息，
+  // 换会话后还挂着上一场的结果会造成张冠李戴。
+  const clearRestoreState = () => {
+    setSelectedProposal(null);
+    setLockedPrompt(null);
+    setOwnerMessageId(null);
+    restore.reset();
+  };
+
+  const handleSelectSession = async (id: string) => {
+    await chat.openSession(id);
+    clearRestoreState();
+  };
+
+  const handleNewSession = () => {
+    chat.startNewSession();
+    clearRestoreState();
+  };
+
+  const handleDeleteSession = async (id: string) => {
+    await chat.removeSession(id);
+    clearRestoreState();
+  };
+
+  const handleClearMemory = async () => {
+    await chat.clearMemory();
+    clearRestoreState();
+  };
+
   const artifactsByMessage = useMemo<Record<string, ArtifactPayload>>(() => {
     if (!ownerMessageId) return {};
     // `image_url` 有两种形态，必须一视同仁地过一遍 resolveAssetUrl：
@@ -185,24 +216,43 @@ export function AIPage() {
         />
       )}
 
-      <ChatPanel
-        messages={chat.messages}
-        sending={chat.sending}
-        stage={chat.stage}
-        sessionId={chat.sessionId}
-        quickStarts={QUICK_STARTS[activeTab]}
-        generating={restore.running}
-        selectedProposalId={selectedProposal?.id ?? null}
-        artifactsByMessage={artifactsByMessage}
-        greeting={GREETINGS[activeTab]}
-        fastMode={fastMode}
-        imageModel={imageModel}
-        onFastModeChange={setFastMode}
-        onImageModelChange={setImageModel}
-        onSend={chat.send}
-        onReset={handleReset}
-        onGenerate={handleGenerate}
-      />
+      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+        <SessionList
+          sessions={chat.sessions}
+          currentId={chat.sessionId}
+          onSelect={handleSelectSession}
+          onNew={handleNewSession}
+          onDelete={handleDeleteSession}
+          onClearMemory={handleClearMemory}
+        />
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <ChatPanel
+            messages={chat.messages}
+            sending={chat.sending}
+            stage={chat.stage}
+            sessionId={chat.sessionId}
+            quickStarts={QUICK_STARTS[activeTab]}
+            generating={restore.running}
+            selectedProposalId={selectedProposal?.id ?? null}
+            artifactsByMessage={artifactsByMessage}
+            greeting={GREETINGS[activeTab]}
+            fastMode={fastMode}
+            imageModel={imageModel}
+            onFastModeChange={setFastMode}
+            onImageModelChange={setImageModel}
+            onSend={chat.send}
+            onReset={handleReset}
+            onGenerate={handleGenerate}
+          />
+        </div>
+      </div>
     </div>
   );
 }

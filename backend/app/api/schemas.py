@@ -217,3 +217,4 @@ class AskResponse(BaseModel):
     model: str = ""
     degraded: bool = False
     retrieval_mode: str = "llm"
+    intent: str = ""  # chat | answer | refuse，由 answerer 判定的意图

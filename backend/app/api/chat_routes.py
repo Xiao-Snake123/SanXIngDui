@@ -20,11 +20,12 @@ import contextlib
 import json
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.conversation.agent import run_chat
+from app.conversation.profile import extract_facts, format_profile
 from app.conversation.store import ChatSession
 from app.conversation.strategies import strategies_for
 from app.core.config import settings
@@ -32,6 +33,8 @@ from app.core.context import RunContext, reset_run_context, set_run_context
 from app.core.logging import get_logger
 from app.core.metrics import metrics
 from app.core.tracing import TraceEvent, TraceRecorder
+from app.storage.chat_history import chat_history
+from app.storage.profile import user_facts
 from app.storage.sessions import sessions
 
 logger = get_logger("app.api.chat")
@@ -54,6 +57,14 @@ class ChatRequest(BaseModel):
         pattern=r"^[A-Za-z0-9_-]{1,64}$",
         description="留空则新建会话",
     )
+    user_id: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_-]{1,64}$",
+        description=(
+            "长期画像的用户标识。留空表示「不知道这是谁」：本轮不读写长期记忆，"
+            "只有会话内的短期记忆（行为与不传完全一致）"
+        ),
+    )
 
 
 class ChatResetRequest(BaseModel):
@@ -64,6 +75,12 @@ class ChatResetRequest(BaseModel):
 async def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
     session: ChatSession = await sessions.get_or_create(payload.session_id)
     await sessions.append_user(session, payload.message)
+
+    # 长期画像：只有传了 user_id 才读。没有用户标识时无从归属，
+    # 本轮退化为「仅短期记忆」，行为与加画像之前完全一致。
+    profile_text = ""
+    if payload.user_id:
+        profile_text = format_profile(await user_facts.list_facts(payload.user_id))
 
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=2048)
     eof = object()
@@ -91,8 +108,12 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
         proposals: list[dict[str, Any]] = []
         intent: dict[str, Any] = {}
         evidence_titles: list[str] = []
+        # 完整引用块：回看时要能点开出处的原文与链接，光有标题不够
+        evidence_items: list[dict[str, Any]] = []
         try:
-            async for event in run_chat(session, payload.message, tracer):
+            async for event in run_chat(
+                session, payload.message, tracer, user_profile=profile_text
+            ):
                 if event["type"] == "message":
                     reply = str(event.get("text") or "")
                 elif event["type"] == "proposals":
@@ -100,7 +121,8 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
                 elif event["type"] == "intent":
                     intent = event.get("intent") or {}
                 elif event["type"] == "evidence":
-                    evidence_titles = [str(item.get("title")) for item in (event.get("items") or [])[:4]]
+                    evidence_items = list(event.get("items") or [])[:4]
+                    evidence_titles = [str(item.get("title")) for item in evidence_items]
                 push(str(event.get("type")), event)
         except Exception as exc:  # noqa: BLE001
             logger.exception("对话轮次执行失败")
@@ -128,6 +150,42 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
                 usage=tracer.usage_summary(),
             )
             tracer.persist()
+            # 会话记录：元信息（供列表）+ 本轮两条消息（供回看 / 回温）。
+            # 没有 user_id 就无从判断「这是谁的会话」，此时不记——
+            # 宁可缺一条记录，也不要记下一条无法归属、别人可能看到的会话。
+            if payload.user_id:
+                await chat_history.upsert_session(
+                    session.session_id,
+                    payload.user_id,
+                    # 标题取首条用户消息：upsert 内部只在标题为空时才写入，
+                    # 所以后续每轮传进来也不会把标题冲掉。
+                    title=payload.message,
+                    turn_count=sum(1 for turn in session.turns if turn.role == "user"),
+                )
+                await chat_history.append_messages(
+                    session.session_id,
+                    [
+                        {"role": "user", "content": payload.message},
+                        {
+                            "role": "assistant",
+                            "content": reply,
+                            "proposals": proposals,
+                            "intent": intent,
+                            "evidence_titles": evidence_titles,
+                            "evidence": evidence_items,
+                        },
+                    ],
+                )
+            # 长期记忆：本轮用户若主动陈述了个人信息（名字、稳定偏好），落库供后续会话使用。
+            # 只有传了 user_id 才抽——没有用户标识时无从归属，也不该产生写库副作用。
+            if payload.user_id:
+                for fact in await extract_facts(payload.message):
+                    await user_facts.upsert(
+                        payload.user_id,
+                        fact["key"],
+                        fact["value"],
+                        source_session_id=session.session_id,
+                    )
         finally:
             reset_run_context(token)
             push("__eof__", eof)
@@ -185,3 +243,60 @@ async def chat_stats() -> dict[str, Any]:
             kind: len(strategies_for(kind)) for kind in ("scene", "figure", "artifact", "style")
         },
     }
+
+
+@router.get("/sessions")
+async def list_chat_sessions(
+    user_id: str = Query(..., pattern=r"^[A-Za-z0-9_-]{1,64}$"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """列出某用户的历史会话，按最近一次对话倒序。
+
+    `user_id` 必填：不传就无法判断「这是谁的会话」，
+    宁可直接拒绝，也不要把别人的会话列出来。
+    """
+    items = await chat_history.list_sessions(user_id, limit=limit, offset=offset)
+    return {"items": items, "limit": limit, "offset": offset}
+
+
+@router.get("/sessions/{session_id}")
+async def get_chat_session(session_id: str) -> dict[str, Any]:
+    """取某会话的完整消息（回看）。
+
+    即使 Redis 里的活跃会话已过期也能回看——消息来自持久记录，不是缓存。
+    """
+    messages = await chat_history.get_messages(session_id)
+    if not messages:
+        raise HTTPException(status_code=404, detail="会话记录不存在")
+    return {
+        "session_id": session_id,
+        "meta": await chat_history.get_session_meta(session_id),
+        "messages": messages,
+    }
+
+
+@router.delete("/sessions")
+async def clear_chat_sessions(
+    user_id: str = Query(..., pattern=r"^[A-Za-z0-9_-]{1,64}$"),
+) -> dict[str, Any]:
+    """清空某用户的全部会话记录。
+
+    只清「聊过什么」，**不动** `user_facts`（长期画像）——
+    要连画像一起忘掉，另外调 `DELETE /api/profile/{user_id}`。
+    """
+    removed = await chat_history.delete_all_sessions(user_id)
+    # removed < 0 表示失败；0 表示「本来就没有会话」。两者语义不同，如实返回。
+    return {"ok": removed >= 0, "removed": removed, "user_id": user_id}
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_chat_session(session_id: str) -> dict[str, Any]:
+    """删除会话：**缓存与记录一起删**。
+
+    只删「聊过什么」，不动 `user_facts`——那是「这个人是谁」，
+    属于长期画像，与会话生命周期无关。
+    """
+    await sessions.reset(session_id)
+    removed = await chat_history.delete_session(session_id)
+    return {"ok": True, "removed": removed, "session_id": session_id}

@@ -26,6 +26,8 @@ export const AGENT_ENDPOINTS = {
   chat: `${AGENT_BASE}/api/chat/stream`,
   chatReset: `${AGENT_BASE}/api/chat/reset`,
   chatStats: `${AGENT_BASE}/api/chat/stats`,
+  // 会话记录（持久化在 PostgreSQL，不是 Redis 缓存）：列表 / 详情 / 删除
+  chatSessions: `${AGENT_BASE}/api/chat/sessions`,
   // 历史任务与质量统计来自 PostgreSQL（跨重启累计），不是进程内计数器
   tasks: `${AGENT_BASE}/api/tasks`,
   qualityStats: `${AGENT_BASE}/api/stats/quality`,
@@ -413,6 +415,32 @@ export interface ChatStreamHandlers {
   onError?: (message: string) => void;
 }
 
+/**
+ * 长期画像的用户标识：首次访问时生成并写进 localStorage，之后一直复用。
+ *
+ * 为什么不接登录系统：长期记忆需要的是「把跨会话记住的事实归属到同一个人」，
+ * 而本项目目前没有账号体系。用一个浏览器级标识即可满足，不必要求用户注册。
+ * 代价是换浏览器 / 清缓存会被当作新用户——这是当前无账号状态下的合理折中。
+ *
+ * 取值受后端校验约束：只允许 `[A-Za-z0-9_-]`，最长 64。
+ */
+const USER_ID_KEY = "sxd.user_id";
+
+export function getUserId(): string {
+  try {
+    const existing = localStorage.getItem(USER_ID_KEY);
+    if (existing) return existing;
+    const random = crypto.randomUUID().replace(/-/g, "").slice(0, 24);
+    const generated = `u-${random}`;
+    localStorage.setItem(USER_ID_KEY, generated);
+    return generated;
+  } catch {
+    // 隐私模式等场景下 localStorage / crypto 不可用：不传 user_id，
+    // 后端退化成「只有会话内短期记忆」，功能不受影响。
+    return "";
+  }
+}
+
 export async function streamChat(
   message: string,
   sessionId: string | null,
@@ -420,8 +448,13 @@ export async function streamChat(
   signal?: AbortSignal,
 ): Promise<void> {
   let response: Response;
+  const userId = getUserId();
   try {
-    response = await openSse(AGENT_ENDPOINTS.chat, { message, session_id: sessionId }, signal);
+    response = await openSse(
+      AGENT_ENDPOINTS.chat,
+      { message, session_id: sessionId, user_id: userId || undefined },
+      signal,
+    );
   } catch (error) {
     if ((error as Error).name === "AbortError") throw error;
     handlers.onError?.("无法连接对话服务，请确认后端已启动。");
@@ -478,6 +511,106 @@ export async function resetChatSession(sessionId: string): Promise<void> {
     });
   } catch {
     /* 重置失败不影响本地清空 */
+  }
+}
+
+/** 会话列表里的一行（后端 chat_sessions 的投影）。 */
+export interface ChatSessionSummary {
+  session_id: string;
+  title: string | null;
+  turn_count: number;
+  last_message_at: string | null;
+  created_at: string | null;
+}
+
+/** 会话详情里的一条消息（后端 chat_messages 的投影）。 */
+export interface ChatMessageRecord {
+  role: "user" | "assistant";
+  content: string;
+  proposals: ChatProposal[];
+  intent: ChatIntent | null;
+  evidence_titles: string[];
+  /** 完整引用块：回看时正文里的 [1] 要能点开出处的原文与链接。 */
+  evidence: EvidenceChunk[];
+  created_at: string | null;
+}
+
+export interface ChatSessionDetail {
+  session_id: string;
+  meta: ChatSessionSummary | null;
+  messages: ChatMessageRecord[];
+}
+
+/** 列出某用户的历史会话（按最近对话倒序）。 */
+export async function fetchChatSessions(
+  userId: string,
+  signal?: AbortSignal,
+): Promise<ChatSessionSummary[]> {
+  try {
+    const url = `${AGENT_ENDPOINTS.chatSessions}?user_id=${encodeURIComponent(userId)}`;
+    const response = await fetch(url, { signal });
+    if (!response.ok) return [];
+    const data = (await response.json()) as { items: ChatSessionSummary[] };
+    return data.items ?? [];
+  } catch {
+    // 拿不到列表不该让整个对话页挂掉：退化成「没有历史会话」
+    return [];
+  }
+}
+
+/** 取某会话的完整消息（回看）。即使 Redis 缓存已过期也能取到——来自持久记录。 */
+export async function fetchChatSession(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<ChatSessionDetail | null> {
+  try {
+    const response = await fetch(
+      `${AGENT_ENDPOINTS.chatSessions}/${encodeURIComponent(sessionId)}`,
+      { signal },
+    );
+    if (!response.ok) return null;
+    return (await response.json()) as ChatSessionDetail;
+  } catch {
+    return null;
+  }
+}
+
+/** 清空某用户的全部会话记录（只清「聊过什么」，不动长期画像）。 */
+export async function clearChatSessions(userId: string): Promise<number> {
+  try {
+    const url = `${AGENT_ENDPOINTS.chatSessions}?user_id=${encodeURIComponent(userId)}`;
+    const response = await fetch(url, { method: "DELETE" });
+    if (!response.ok) return 0;
+    const data = (await response.json()) as { removed: number };
+    return data.removed ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** 删除某用户的长期画像——「这个人是谁」那一层。 */
+export async function deleteUserProfile(userId: string): Promise<number> {
+  try {
+    const response = await fetch(
+      `${AGENT_BASE}/api/profile/${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) return 0;
+    const data = (await response.json()) as { removed: number };
+    return data.removed ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** 删除会话：后端会同时清掉持久记录与 Redis 缓存。 */
+export async function deleteChatSession(sessionId: string): Promise<void> {
+  try {
+    await fetch(`${AGENT_ENDPOINTS.chatSessions}/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    });
+  } catch {
+    /* 删除失败不影响本地刷新 */
   }
 }
 

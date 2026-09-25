@@ -38,6 +38,7 @@ from app.conversation.store import (
     ChatTurn,
 )
 from app.core.config import settings
+from app.storage.chat_history import chat_history
 from app.core.logging import get_logger
 from app.core.metrics import metrics
 
@@ -299,9 +300,52 @@ class SessionRepository:
             existing = await self.backend.load(session_id)
             if existing is not None:
                 return existing
+            # 回温：Redis 里没有（TTL 到期 / 被容量淘汰），但记录还在 PostgreSQL。
+            # 必须从记录重建——否则旧会话「能看不能聊」，那就只是半个功能。
+            revived = await self._revive_from_history(session_id)
+            if revived is not None:
+                await self.backend.save(revived)
+                return revived
         new_id = session_id or f"chat-{uuid.uuid4().hex[:10]}"
         session = ChatSession(session_id=new_id)
         await self.backend.save(session)
+        return session
+
+    async def _revive_from_history(self, session_id: str) -> ChatSession | None:
+        """从持久记录重建会话，让旧会话能继续聊。
+
+        Redis 是缓存、会过期；PostgreSQL 才是记录。这里把记录还原成 ChatSession，
+        于是两件事同时成立：
+        - 打开旧会话能继续对话；
+        - 短期记忆照常工作（history() 读的就是 turns，而 turns 在这里被完整恢复）。
+        """
+        try:
+            messages = await chat_history.get_messages(session_id)
+        except Exception as exc:  # noqa: BLE001 - 记录读不出来不应阻断新建会话
+            logger.warning("会话回温失败 [%s]: %s", session_id, exc)
+            return None
+        if not messages:
+            return None
+
+        session = ChatSession(session_id=session_id)
+        for item in messages:
+            session.append(
+                ChatTurn(
+                    role=str(item.get("role") or "user"),
+                    content=str(item.get("content") or ""),
+                    proposals=list(item.get("proposals") or []),
+                    intent=dict(item.get("intent") or {}),
+                    evidence_titles=list(item.get("evidence_titles") or []),
+                )
+            )
+        # 创作管线的多轮修改依赖 last_intent（「再换个角度」要知道原来的方案），
+        # 用最近一条助手消息的 intent 还原它。
+        for item in reversed(messages):
+            if str(item.get("role")) == "assistant" and item.get("intent"):
+                session.last_intent = dict(item["intent"])
+                break
+        logger.info("会话已从记录回温: %s（%d 条消息）", session_id, len(messages))
+        metrics.inc("sxd_session_revived_total")
         return session
 
     async def get(self, session_id: str) -> ChatSession | None:
