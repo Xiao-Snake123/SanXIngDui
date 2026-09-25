@@ -38,6 +38,18 @@ backend/training/data/
 # 本地 dev server / 测试 / 自检脚本重定向出来的输出，不属于源码
 *.log
 
+# ── 临时调试脚本与一次性测试输出 ─────────────────────────────────────────────
+# 下划线前缀的脚本是排查问题时临时写的，不作为仓库源码
+backend/_test_*.py
+backend/test_*_out.txt
+backend/test_refuse_results.txt
+backend/*.err
+
+# ── 工具缓存与体积较大的验证产物 ─────────────────────────────────────────────
+.playwright-cli/
+# UI 走查截图集（约 5MB 二进制），不入库；README 引用的 docs/screenshots/ 除外
+docs/testing/
+
 # ── 编辑器 / 系统 ───────────────────────────────────────────────────────────
 .vscode/*
 !.vscode/settings.json

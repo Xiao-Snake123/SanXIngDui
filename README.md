@@ -1,5 +1,13 @@
 # 三星堆文物复原 Multi-Agent 系统
 
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-Supervisor%2FWorker-1C3C3C)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white)
+![tests](https://img.shields.io/badge/tests-314_passing-brightgreen)
+![license](https://img.shields.io/badge/status-个人项目-informational)
+
 > **接手开发前请先读 [`docs/HANDOFF.md`](docs/HANDOFF.md)。**
 > 那里有：当前进度与已验证状态、**已修复的「回炉无效」Bug 及其实测根因**、
 > 剩余任务清单、本机环境踩坑（端口 / 代理 / PowerShell）、需要配置的环境变量，
@@ -11,6 +19,48 @@
 用户用一句自然语言描述需求 → 规划 Agent 检索史料并给出多个**候选提示词方案** →
 用户选定或改写其中一份 → 图像修复 Worker 严格按该提示词出图 →
 质检 Agent 校验风格一致性，不达标自动回炉重做（**Self-Correction**）。
+
+**一次真实运行的全过程**（Agent 轨迹时间线 + 逐轮复原记录 + 最终成品）：
+
+![一次真实运行：Agent 轨迹与复原结果](docs/screenshots/ai-scene-flow-2-result.png)
+
+## 目录
+
+- [快速开始](#快速开始)
+- [系统总览](#系统总览)
+- [无 Key 也能跑](#无-key-也能跑)
+- [关键设计决策](#关键设计决策)
+- [可观测性与评估](#可观测性与评估)
+- [延伸阅读](#延伸阅读)
+
+---
+
+## 系统总览
+
+**编排拓扑**：Supervisor 只做调度不做执行；`quality → restoration` 构成回炉环，
+回炉预算（轮次 + 收益递减）由质检 Agent 单方面决定，Supervisor 无权越过：
+
+```mermaid
+flowchart LR
+    P["planner<br/>规划 Agent<br/>(规则骨架 + LLM 增量)"] --> S{"supervisor<br/>调度中枢<br/>(规则 + LLM 双层)"}
+    S -->|"缺史料依据"| R["retrieval<br/>史料检索<br/>(BM25+向量+rerank)"]
+    S -->|"尚未出图"| W["restoration<br/>图像修复<br/>(三级降级出图链)"]
+    S -->|"产物齐备"| C["copywriting<br/>科普文案"]
+    S -->|"预算耗尽"| F["finalize<br/>结果汇总"]
+    R --> S
+    C --> S
+    W --> Q{"quality<br/>质检 Agent<br/>(VLM + 客观指标融合)"}
+    Q -->|"未达标且未超预算<br/>注入修改指令回炉"| W
+    Q -->|"达标 / skipped / 收益递减早停"| S
+```
+
+**两段式交互**：先对话选提示词（花钱前可干预），再确定性出图（选定即逐字锁定）。
+下面两张截图分别对应两段 —— 同一次会话，先在 4 个候选方案里做选择，再看着 Agent
+逐步执行并交付成品：
+
+| ① 对话层：候选提示词方案（含选题理由 `rationale` 与风险 `risk`） | ② 复原层：Agent 轨迹 + 成品 |
+|---|---|
+| ![候选提示词方案](docs/screenshots/ai-scene-flow-1-proposals.png) | ![复原结果](docs/screenshots/ai-scene-flow-2-result.png) |
 
 ---
 
@@ -30,12 +80,12 @@ SanXIngDui/
 │
 ├── backend/           后端：Python 3.11+ / FastAPI / LangGraph
 │   ├── app/           服务源码（按职责分层，见 backend/README.md）
-│   ├── data/corpus/   史料语料（50 条，JSONL）
+│   ├── data/corpus/   史料语料（v2 · 266 条，JSONL，含出处与可信度分级）
 │   ├── migrations/    Alembic 迁移（任务 / 产物 / 质检 / 向量表）
 │   ├── training/      QLoRA 微调管线（数据准备 / 训练 / 推理）
 │   ├── scripts/       自检与诊断脚本（含后端启动脚本 run.ps1）
 │   ├── start.cmd      转发到根目录 start.cmd（停在 backend/ 下也能一条命令启动）
-│   ├── tests/         219 个测试
+│   ├── tests/         314 个测试（14 个文件）
 │   └── requirements.txt
 │
 ├── docs/              设计文档（存储 / 模型选型 / 降级策略）与 HANDOFF.md 交接文档
@@ -200,6 +250,16 @@ npm test                     # 组件与接口封装测试（vitest + jsdom，�
 客观指标（饱和度 / 近白高光占比 / 色彩家族分布 / 边缘密度 / 平坦区占比）不会幻觉，
 VLM 负责客观指标测不到的形制与时代合规。两者冲突时以客观指标兜底，
 时代错配一票否决（分数封顶 0.40）。
+
+```text
+score = 0.6 × VLM五维加权 + 0.4 × 客观指标      # VLM 不可用时退化为纯客观
+        客观分 < 0.5 → score = min(score, (obj+judge)/2)   # 防 VLM 幻觉放水
+        时代错配     → score 封顶 0.40（一票否决，并记录 capped_by）
+回炉预算 = max_revisions 2 次硬上限 + 收益递减早停（Δscore < 0.02 即停）
+```
+
+回炉环的完整拓扑见上文[系统总览](#系统总览)；「为什么回炉曾经过无效、如何实测定位」
+见 [`docs/HANDOFF.md`](docs/HANDOFF.md)。
 
 ---
 
